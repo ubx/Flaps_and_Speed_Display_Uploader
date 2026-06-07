@@ -146,18 +146,17 @@ public class BleOtaManager {
         @Override
         public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
             Log.d(TAG, "onCharacteristicWrite: " + characteristic.getUuid().toString() + " status: " + status + " state: " + otaState);
-            writeInProgress = false;
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                handler.post(() -> {
+            handler.post(() -> {
+                writeInProgress = false;
+                if (status == BluetoothGatt.GATT_SUCCESS) {
                     if (characteristic.getUuid().equals(OTA_CTRL_UUID)) {
                         if (otaState == STATE_STARTING) {
                             otaState = STATE_DATA;
-                            //sendNextChunk();
-                            handler.post(() -> sendNextChunk());
+                            sendNextChunk();
                         } else if (otaState == STATE_FINISHING) {
                             callback.onStatusUpdate("Finished upload.");
                             if (targetMode == TARGET_APP_OTA && !noReboot) {
-                                handler.postDelayed(() -> sendRebootCommand(), 500);
+                                handler.postDelayed(() -> sendRebootCommand(), 1000);
                             } else {
                                 otaState = STATE_IDLE;
                                 callback.onSuccess();
@@ -167,16 +166,18 @@ public class BleOtaManager {
                             callback.onSuccess();
                         }
                     } else if (characteristic.getUuid().equals(OTA_DATA_UUID)) {
-                        sentBytes += characteristic.getValue().length;
+                        byte[] value = characteristic.getValue();
+                        if (value != null) {
+                            sentBytes += value.length;
+                        }
                         callback.onProgress(sentBytes, payload.length);
-                        //sendNextChunk();
-                        handler.post(() -> sendNextChunk());
+                        sendNextChunk();
                     }
-                });
-            } else {
-                Log.e(TAG, "Write failed with status " + status + " at state " + otaState);
-                callback.onError("Write failed: " + status + " (State: " + otaState + ")");
-            }
+                } else {
+                    Log.e(TAG, "Write failed with status " + status + " at state " + otaState);
+                    callback.onError("Write failed: " + status + " (State: " + otaState + ")");
+                }
+            });
         }
     };
 
@@ -232,8 +233,9 @@ public class BleOtaManager {
         writeInProgress = true;
 
         if (sentBytes >= payload.length) {
-            callback.onStatusUpdate("Wait before finishing...");
-            handler.postDelayed(() -> sendFinishCommand(), 500);
+            callback.onStatusUpdate("Verifying upload...");
+            // Increased delay to allow firmware to process the last flash block and settle
+            handler.postDelayed(() -> sendFinishCommand(), 1500);
             return;
         }
 
