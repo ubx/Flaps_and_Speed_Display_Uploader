@@ -48,6 +48,7 @@ public class BleOtaManager {
     private boolean mtuRequested = false;
 
     private int sentBytes = 0;
+    private boolean writeInProgress = false;
     private Callback callback;
 
     private int otaState = 0;
@@ -145,13 +146,14 @@ public class BleOtaManager {
         @Override
         public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
             Log.d(TAG, "onCharacteristicWrite: " + characteristic.getUuid().toString() + " status: " + status + " state: " + otaState);
+            writeInProgress = false;
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 handler.post(() -> {
                     if (characteristic.getUuid().equals(OTA_CTRL_UUID)) {
                         if (otaState == STATE_STARTING) {
                             otaState = STATE_DATA;
                             //sendNextChunk();
-                            handler.postDelayed(() -> sendNextChunk(), 10);
+                            handler.post(() -> sendNextChunk());
                         } else if (otaState == STATE_FINISHING) {
                             callback.onStatusUpdate("Finished upload.");
                             if (targetMode == TARGET_APP_OTA && !noReboot) {
@@ -168,7 +170,7 @@ public class BleOtaManager {
                         sentBytes += characteristic.getValue().length;
                         callback.onProgress(sentBytes, payload.length);
                         //sendNextChunk();
-                        handler.postDelayed(() -> sendNextChunk(), 10);
+                        handler.post(() -> sendNextChunk());
                     }
                 });
             } else {
@@ -226,6 +228,9 @@ public class BleOtaManager {
     }
 
     private void sendNextChunk() {
+        if (writeInProgress) return;
+        writeInProgress = true;
+
         if (sentBytes >= payload.length) {
             callback.onStatusUpdate("Wait before finishing...");
             handler.postDelayed(() -> sendFinishCommand(), 500);
@@ -248,17 +253,22 @@ public class BleOtaManager {
         if (success) {
             // Wait for onCharacteristicWrite to update sentBytes and trigger next chunk
         } else {
+            writeInProgress = false;
             callback.onError("Failed to write chunk.");
         }
     }
 
     private void sendFinishCommand() {
-        if (bluetoothGatt == null || ctrlChar == null) return;
+        if (bluetoothGatt == null || ctrlChar == null) {
+            writeInProgress = false;
+            return;
+        }
         otaState = STATE_FINISHING;
         callback.onStatusUpdate("Sending FINISH command...");
         ctrlChar.setValue(new byte[]{CMD_FINISH});
         ctrlChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
         if (!bluetoothGatt.writeCharacteristic(ctrlChar)) {
+            writeInProgress = false;
             callback.onError("Failed to send FINISH command.");
         }
     }
