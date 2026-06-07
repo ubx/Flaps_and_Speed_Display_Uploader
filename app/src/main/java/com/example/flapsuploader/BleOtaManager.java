@@ -42,10 +42,10 @@ public class BleOtaManager {
     private byte[] payload;
     private int targetMode;
     private String remotePath;
-    private int chunkSize = 20; // Default to safe value for BLE
+    private int chunkSize = 200; // Default to safe value for BLE
     private boolean useWriteWithResponse = true;
-    private boolean noReboot = false;
-    private boolean mtuRequested = false;
+    private boolean noReboot = true;
+    private boolean mtuRequested = true;
 
     private int sentBytes = 0;
     private boolean writeInProgress = false;
