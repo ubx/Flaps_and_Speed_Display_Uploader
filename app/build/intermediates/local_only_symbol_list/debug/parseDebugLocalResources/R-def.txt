@@ -1,0 +1,13 @@
+R_DEF: Internal format may change without notice
+local
+id btnSelectFile
+id btnUpload
+id editRemotePath
+id progressBar
+id radioFirmware
+id radioSpiffs
+id targetGroup
+id textSelectedFile
+id textStatus
+layout activity_main
+string app_name
