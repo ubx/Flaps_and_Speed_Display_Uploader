@@ -41,7 +41,7 @@ public class BleOtaManager {
     private byte[] payload;
     private int targetMode;
     private String remotePath;
-    private int chunkSize = 20; // Default to safe value
+    private int chunkSize = 180; // Default to safe value
     private boolean useWriteWithResponse = true;
     private boolean noReboot = false;
     private boolean mtuRequested = false;
