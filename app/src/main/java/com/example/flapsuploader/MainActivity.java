@@ -233,8 +233,8 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
-            public void onStatusUpdate(String status) {
-                runOnUiThread(() -> textStatus.setText("Status: " + status));
+            public void onStatus(String status) {
+                runOnUiThread(() -> textStatus.setText("StatusX: " + status));
             }
         });
     }

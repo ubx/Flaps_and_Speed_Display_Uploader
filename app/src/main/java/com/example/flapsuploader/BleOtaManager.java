@@ -1,6 +1,5 @@
 package com.example.flapsuploader;
 
-import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCallback;
@@ -12,19 +11,25 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+import android.annotation.SuppressLint;
 
+import android.bluetooth.BluetoothStatusCodes;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.UUID;
+import java.util.*;
 import java.util.zip.CRC32;
 
+@SuppressLint("MissingPermission")
 public class BleOtaManager {
+
     private static final String TAG = "BleOtaManager";
 
-    public static final UUID OTA_CTRL_UUID = UUID.fromString("2ae4d630-7d4b-2dae-8b4f-14310bb05d39");
-    public static final UUID OTA_DATA_UUID = UUID.fromString("2ae4d630-7d4b-2dae-8b4f-14310cb05d39");
+    public static final UUID OTA_CTRL_UUID =
+            UUID.fromString("2ae4d630-7d4b-2dae-8b4f-14310bb05d39");
+
+    public static final UUID OTA_DATA_UUID =
+            UUID.fromString("2ae4d630-7d4b-2dae-8b4f-14310cb05d39");
 
     public static final byte CMD_START = 0x01;
     public static final byte CMD_FINISH = 0x02;
@@ -33,270 +38,396 @@ public class BleOtaManager {
     public static final byte TARGET_APP_OTA = 0x00;
     public static final byte TARGET_SPIFFS_FILE = 0x02;
 
+    private static final int STATE_IDLE = 0;
+    private static final int STATE_START = 1;
+    private static final int STATE_DATA = 2;
+    private static final int STATE_FINISH = 3;
+    private static final int STATE_REBOOT = 4;
+
+    private static final int MAX_RETRIES = 3;
+    private static final long WRITE_TIMEOUT_MS = 8000;
+    private static final long INTER_CHUNK_DELAY_MS = 10;
+
     private final Context context;
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private BluetoothGatt bluetoothGatt;
+
+    private BluetoothGatt gatt;
     private BluetoothGattCharacteristic ctrlChar;
     private BluetoothGattCharacteristic dataChar;
 
     private byte[] payload;
     private int targetMode;
     private String remotePath;
-    private int chunkSize = 200; // Default to safe value for BLE
-    private boolean useWriteWithResponse = true;
-    private boolean noReboot = true;
-    private boolean mtuRequested = true;
 
-    private int sentBytes = 0;
-    private boolean writeInProgress = false;
     private Callback callback;
 
-    private int otaState = 0;
-    private static final int STATE_IDLE = 0;
-    private static final int STATE_STARTING = 1;
-    private static final int STATE_DATA = 2;
-    private static final int STATE_FINISHING = 3;
-    private static final int STATE_REBOOTING = 4;
+    private int state = STATE_IDLE;
+    private int offset = 0;
+    private int mtu = 23;
+    private int chunkSize = 20;
+
+    private boolean writeInProgress = false;
+    private Runnable timeoutRunnable;
+
+    private final Queue<WriteOp> queue = new ArrayDeque<>();
+
+    private static class WriteOp {
+        BluetoothGattCharacteristic ch;
+        byte[] data;
+        int writeType;
+        int retries = 0;
+
+        WriteOp(BluetoothGattCharacteristic ch, byte[] data, int writeType) {
+            this.ch = ch;
+            this.data = data;
+            this.writeType = writeType;
+        }
+    }
 
     public interface Callback {
         void onProgress(int sent, int total);
+        void onStatus(String msg);
         void onSuccess();
-        void onError(String message);
-        void onStatusUpdate(String status);
+        void onError(String msg);
     }
 
     public BleOtaManager(Context context) {
         this.context = context;
     }
 
-    public void startOta(BluetoothDevice device, byte[] payload, int targetMode, String remotePath, Callback callback) {
+    // ------------------------------------------------------------
+    // PUBLIC START
+    // ------------------------------------------------------------
+
+    public void startOta(BluetoothDevice device,
+                         byte[] payload,
+                         int targetMode,
+                         String remotePath,
+                         Callback cb) {
+
         this.payload = payload;
         this.targetMode = targetMode;
         this.remotePath = remotePath;
-        this.callback = callback;
-        this.sentBytes = 0;
-        this.otaState = STATE_IDLE;
+        this.callback = cb;
 
-        callback.onStatusUpdate("Connecting to " + device.getName() + "...");
+        this.offset = 0;
+        this.state = STATE_IDLE;
+
+        cb.onStatus("Connecting...");
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
+            gatt = device.connectGatt(context, false, gattCallback,
+                    BluetoothDevice.TRANSPORT_LE);
         } else {
-            bluetoothGatt = device.connectGatt(context, false, gattCallback);
+            gatt = device.connectGatt(context, false, gattCallback);
         }
     }
 
+    // ------------------------------------------------------------
+    // GATT CALLBACK
+    // ------------------------------------------------------------
+
     private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
-        @Override
-        public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                Log.i(TAG, "Connected to GATT server.");
-                callback.onStatusUpdate("Connected. Discovering services...");
-                gatt.discoverServices();
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    Log.i(TAG, "Requesting high connection priority...");
-                    gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH);
-                }
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                Log.i(TAG, "Disconnected from GATT server.");
-                if (sentBytes >= (payload != null ? payload.length : 0) && !noReboot) {
-                     // Likely reboot disconnect
-                     callback.onStatusUpdate("Device disconnected (rebooted).");
-                }
-            }
-        }
 
         @Override
-        public void onServicesDiscovered(BluetoothGatt gatt, int status) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.i(TAG, "Services discovered.");
-                findCharacteristics(gatt);
-                if (ctrlChar != null && dataChar != null) {
-                    // Small delay before MTU request to let some stacks settle
-                    handler.postDelayed(() -> {
-                        if (bluetoothGatt == null) return;
-                        Log.i(TAG, "Requesting MTU...");
-                        if (!bluetoothGatt.requestMtu(247)) {
-                            Log.w(TAG, "Failed to request MTU, starting with default.");
-                            chunkSize = 20;
-                            handler.postDelayed(() -> sendStartCommand(), 500);
-                        }
-                    }, 500);
-                } else {
-                    callback.onError("OTA characteristics not found.");
-                }
-            } else {
-                Log.w(TAG, "onServicesDiscovered received: " + status);
-                callback.onError("Service discovery failed: " + status);
-            }
-        }
-
-        @Override
-        public void onMtuChanged(BluetoothGatt gatt, int mtu, int status) {
-            Log.i(TAG, "MTU changed to " + mtu + ", status: " + status);
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                chunkSize = Math.min(mtu - 3, 128); // Limit to safe value
-                Log.i(TAG, "Set chunkSize to " + chunkSize);
-            } else {
-                chunkSize = 20; // Fallback
-            }
-            // Start OTA process after a short delay to let the stack settle
-            handler.postDelayed(() -> sendStartCommand(), 500);
-        }
-
-        @Override
-        public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
-            Log.d(TAG, "onCharacteristicWrite: " + characteristic.getUuid().toString() + " status: " + status + " state: " + otaState);
+        public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
             handler.post(() -> {
-                writeInProgress = false;
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    if (characteristic.getUuid().equals(OTA_CTRL_UUID)) {
-                        if (otaState == STATE_STARTING) {
-                            otaState = STATE_DATA;
-                            sendNextChunk();
-                        } else if (otaState == STATE_FINISHING) {
-                            callback.onStatusUpdate("Finished upload.");
-                            if (targetMode == TARGET_APP_OTA && !noReboot) {
-                                handler.postDelayed(() -> sendRebootCommand(), 1000);
-                            } else {
-                                otaState = STATE_IDLE;
-                                callback.onSuccess();
-                            }
-                        } else if (otaState == STATE_REBOOTING) {
-                            otaState = STATE_IDLE;
-                            callback.onSuccess();
-                        }
-                    } else if (characteristic.getUuid().equals(OTA_DATA_UUID)) {
-                        byte[] value = characteristic.getValue();
-                        if (value != null) {
-                            sentBytes += value.length;
-                        }
-                        callback.onProgress(sentBytes, payload.length);
-                        sendNextChunk();
+                if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    callback.onStatus("Connected. Discovering...");
+                    g.discoverServices();
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        g.requestConnectionPriority(
+                                BluetoothGatt.CONNECTION_PRIORITY_HIGH);
                     }
+
+                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                    callback.onStatus("Disconnected");
+                    if (state != STATE_IDLE && state != STATE_REBOOT) {
+                        callback.onError("Disconnected during update");
+                    }
+                }
+            });
+        }
+
+        @Override
+        public void onServicesDiscovered(BluetoothGatt g, int status) {
+            handler.post(() -> {
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    callback.onError("Service discovery failed");
+                    return;
+                }
+
+                for (BluetoothGattService s : g.getServices()) {
+                    for (BluetoothGattCharacteristic c : s.getCharacteristics()) {
+                        if (OTA_CTRL_UUID.equals(c.getUuid())) ctrlChar = c;
+                        if (OTA_DATA_UUID.equals(c.getUuid())) dataChar = c;
+                    }
+                }
+
+                if (ctrlChar == null || dataChar == null) {
+                    callback.onError("OTA characteristics missing");
+                    return;
+                }
+
+                requestMtu();
+            });
+        }
+
+        @Override
+        public void onMtuChanged(BluetoothGatt g, int mtuValue, int status) {
+            handler.post(() -> {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    mtu = mtuValue;
+                    chunkSize = Math.max(20, mtu - 3);
                 } else {
-                    Log.e(TAG, "Write failed with status " + status + " at state " + otaState);
-                    callback.onError("Write failed: " + status + " (State: " + otaState + ")");
+                    chunkSize = 20;
+                }
+
+                callback.onStatus("MTU=" + mtu + " chunk=" + chunkSize);
+
+                // Small delay to let the stack settle
+                handler.postDelayed(BleOtaManager.this::startStartCommand, 100);
+            });
+        }
+
+        @Override
+        public void onCharacteristicWrite(BluetoothGatt g,
+                                          BluetoothGattCharacteristic c,
+                                          int status) {
+
+            handler.post(() -> {
+                cancelTimeout();
+                writeInProgress = false;
+
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    Log.w(TAG, "Write failed status=" + status + " for " + c.getUuid());
+                    handleRetryOrFail(c);
+                    return;
+                }
+
+                synchronized (queue) {
+                    queue.poll();
+                }
+
+                if (c.getUuid().equals(OTA_CTRL_UUID)) {
+                    handleControlFlow();
+                } else if (c.getUuid().equals(OTA_DATA_UUID)) {
+                    if (state == STATE_DATA) {
+                        callback.onProgress(offset, payload.length);
+                        handler.postDelayed(BleOtaManager.this::sendNextChunk, INTER_CHUNK_DELAY_MS);
+                    }
                 }
             });
         }
     };
 
-    private void findCharacteristics(BluetoothGatt gatt) {
-        for (BluetoothGattService service : gatt.getServices()) {
-            for (BluetoothGattCharacteristic characteristic : service.getCharacteristics()) {
-                if (characteristic.getUuid().equals(OTA_CTRL_UUID)) {
-                    ctrlChar = characteristic;
-                } else if (characteristic.getUuid().equals(OTA_DATA_UUID)) {
-                    dataChar = characteristic;
-                }
-            }
+    // ------------------------------------------------------------
+    // QUEUE SYSTEM
+    // ------------------------------------------------------------
+
+    private void enqueue(BluetoothGattCharacteristic ch, byte[] data, int type) {
+        synchronized (queue) {
+            queue.add(new WriteOp(ch, data, type));
         }
+        handler.post(this::processQueue);
     }
 
-    private void sendStartCommand() {
-        if (bluetoothGatt == null || ctrlChar == null) return;
-        otaState = STATE_STARTING;
-        callback.onStatusUpdate("Sending START command...");
-        CRC32 crc = new CRC32();
-        crc.update(payload);
-        long crcValue = crc.getValue();
-
-        int startPacketSize = 1 + 4 + 4; // CMD + size + CRC
-        if (targetMode == TARGET_SPIFFS_FILE) {
-            byte[] remotePathBytes = remotePath.getBytes(StandardCharsets.UTF_8);
-            startPacketSize += 2 + remotePathBytes.length;
-        }
-
-        ByteBuffer buffer = ByteBuffer.allocate(startPacketSize).order(ByteOrder.LITTLE_ENDIAN);
-        buffer.put(CMD_START);
-        buffer.putInt(payload.length);
-        buffer.putInt((int) crcValue);
-
-        if (targetMode == TARGET_SPIFFS_FILE) {
-            byte[] remotePathBytes = remotePath.getBytes(StandardCharsets.UTF_8);
-            buffer.put(TARGET_SPIFFS_FILE);
-            buffer.put((byte) remotePathBytes.length);
-            buffer.put(remotePathBytes);
-        }
-
-        ctrlChar.setValue(buffer.array());
-        ctrlChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-        Log.i(TAG, "Sending START command, size: " + startPacketSize);
-        if (!bluetoothGatt.writeCharacteristic(ctrlChar)) {
-            Log.e(TAG, "writeCharacteristic failed for START command");
-            callback.onError("Failed to send START command.");
-        }
-    }
-
-    private void sendNextChunk() {
+    private void processQueue() {
         if (writeInProgress) return;
+
+        WriteOp op;
+        synchronized (queue) {
+            op = queue.peek();
+        }
+        if (op == null) return;
+
+        if (gatt == null) {
+            callback.onError("GATT disconnected");
+            return;
+        }
+
         writeInProgress = true;
 
-        if (sentBytes >= payload.length) {
-            callback.onStatusUpdate("Verifying upload...");
-            // Increased delay to allow firmware to process the last flash block and settle
-            handler.postDelayed(() -> sendFinishCommand(), 1500);
-            return;
-        }
-
-        int remaining = payload.length - sentBytes;
-        int currentChunkSize = Math.min(remaining, chunkSize);
-        byte[] chunk = Arrays.copyOfRange(payload, sentBytes, sentBytes + currentChunkSize);
-
-        dataChar.setValue(chunk);
-        if (useWriteWithResponse) {
-            dataChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-        } else {
-            dataChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
-        }
-
-        Log.d(TAG, "Writing chunk: " + sentBytes + "/" + payload.length + " (size: " + currentChunkSize + ")");
-        boolean success = bluetoothGatt.writeCharacteristic(dataChar);
-        if (success) {
-            // Wait for onCharacteristicWrite to update sentBytes and trigger next chunk
-        } else {
-            writeInProgress = false;
-            callback.onError("Failed to write chunk.");
-        }
-    }
-
-    private void sendFinishCommand() {
-        if (bluetoothGatt == null || ctrlChar == null) {
-            writeInProgress = false;
-            return;
-        }
-        otaState = STATE_FINISHING;
-        callback.onStatusUpdate("Sending FINISH command...");
-        ctrlChar.setValue(new byte[]{CMD_FINISH});
-        ctrlChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-        if (!bluetoothGatt.writeCharacteristic(ctrlChar)) {
-            writeInProgress = false;
-            callback.onError("Failed to send FINISH command.");
-        }
-    }
-
-    private void sendRebootCommand() {
-        otaState = STATE_REBOOTING;
-        callback.onStatusUpdate("Sending REBOOT command...");
-        ctrlChar.setValue(new byte[]{CMD_REBOOT});
-        ctrlChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+        boolean ok;
         try {
-            if (!bluetoothGatt.writeCharacteristic(ctrlChar)) {
-                otaState = STATE_IDLE;
-                callback.onSuccess(); // Assume success if we can't write, likely disconnected
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ok = gatt.writeCharacteristic(op.ch, op.data, op.writeType) == BluetoothStatusCodes.SUCCESS;
+            } else {
+                op.ch.setWriteType(op.writeType);
+                op.ch.setValue(op.data);
+                ok = gatt.writeCharacteristic(op.ch);
             }
         } catch (Exception e) {
-            // Might disconnect immediately
-            otaState = STATE_IDLE;
+            Log.e(TAG, "Exception during write", e);
+            ok = false;
+        }
+
+        if (!ok) {
+            writeInProgress = false;
+            handleRetryOrFail(op.ch);
+            return;
+        }
+
+        startTimeout();
+    }
+
+    // ------------------------------------------------------------
+    // OTA FLOW
+    // ------------------------------------------------------------
+
+    private void startStartCommand() {
+        state = STATE_START;
+
+        CRC32 crc = new CRC32();
+        crc.update(payload);
+
+        ByteBuffer buf;
+
+        if (targetMode == TARGET_SPIFFS_FILE) {
+
+            byte[] path = remotePath.getBytes(StandardCharsets.UTF_8);
+
+            buf = ByteBuffer.allocate(1 + 4 + 4 + 2 + path.length)
+                    .order(ByteOrder.LITTLE_ENDIAN);
+
+            buf.put(CMD_START);
+            buf.putInt(payload.length);
+            buf.putInt((int) crc.getValue());
+            buf.put(TARGET_SPIFFS_FILE);
+            buf.put((byte) path.length);
+            buf.put(path);
+
+        } else {
+
+            buf = ByteBuffer.allocate(1 + 4 + 4)
+                    .order(ByteOrder.LITTLE_ENDIAN);
+
+            buf.put(CMD_START);
+            buf.putInt(payload.length);
+            buf.putInt((int) crc.getValue());
+        }
+
+        enqueue(ctrlChar, buf.array(),
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+    }
+
+    private void handleControlFlow() {
+
+        if (state == STATE_START) {
+            state = STATE_DATA;
+            sendNextChunk();
+        }
+
+        else if (state == STATE_FINISH) {
+            if (targetMode == TARGET_APP_OTA) {
+                sendReboot();
+            } else {
+                callback.onSuccess();
+            }
+        }
+
+        else if (state == STATE_REBOOT) {
             callback.onSuccess();
         }
     }
 
+    private void sendNextChunk() {
+
+        if (offset >= payload.length) {
+            sendFinish();
+            return;
+        }
+
+        int len = Math.min(chunkSize, payload.length - offset);
+
+        byte[] chunk = Arrays.copyOfRange(payload, offset, offset + len);
+
+        offset += len;
+
+        enqueue(dataChar, chunk,
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+    }
+
+    private void sendFinish() {
+        state = STATE_FINISH;
+
+        enqueue(ctrlChar, new byte[]{CMD_FINISH},
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+    }
+
+    private void sendReboot() {
+        state = STATE_REBOOT;
+
+        enqueue(ctrlChar, new byte[]{CMD_REBOOT},
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+    }
+
+    // ------------------------------------------------------------
+    // MTU
+    // ------------------------------------------------------------
+
+    private void requestMtu() {
+        gatt.requestMtu(247);
+    }
+
+    // ------------------------------------------------------------
+    // TIMEOUT + RETRY
+    // ------------------------------------------------------------
+
+    private void startTimeout() {
+        cancelTimeout();
+
+        timeoutRunnable = () -> {
+            WriteOp op;
+            synchronized (queue) {
+                op = queue.peek();
+            }
+            if (op == null) return;
+
+            if (op.retries++ < MAX_RETRIES) {
+                Log.i(TAG, "Timeout, retrying... attempt " + op.retries);
+                writeInProgress = false;
+                processQueue();
+            } else {
+                callback.onError("Write timeout");
+            }
+        };
+
+        handler.postDelayed(timeoutRunnable, WRITE_TIMEOUT_MS);
+    }
+
+    private void cancelTimeout() {
+        if (timeoutRunnable != null) {
+            handler.removeCallbacks(timeoutRunnable);
+            timeoutRunnable = null;
+        }
+    }
+
+    private void handleRetryOrFail(BluetoothGattCharacteristic c) {
+        WriteOp op;
+        synchronized (queue) {
+            op = queue.peek();
+        }
+
+        if (op != null && op.retries++ < MAX_RETRIES) {
+            Log.i(TAG, "Retrying write... attempt " + op.retries + " for " + c.getUuid());
+            writeInProgress = false;
+            handler.postDelayed(this::processQueue, 500);
+        } else {
+            callback.onError("Write failed after max retries");
+        }
+    }
+
+    // ------------------------------------------------------------
+    // CLEANUP
+    // ------------------------------------------------------------
+
     public void disconnect() {
-        if (bluetoothGatt != null) {
-            bluetoothGatt.disconnect();
-            bluetoothGatt.close();
-            bluetoothGatt = null;
+        if (gatt != null) {
+            gatt.disconnect();
+            gatt.close();
+            gatt = null;
         }
     }
 }
