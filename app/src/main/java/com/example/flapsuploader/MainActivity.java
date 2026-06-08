@@ -126,7 +126,7 @@ public class MainActivity extends AppCompatActivity {
                     btnUpload.setEnabled(true);
                     
                     if (targetGroup.getCheckedRadioButtonId() == R.id.radioSpiffs) {
-                         editRemotePath.setText("/spiffs/" + selectedFileName);
+                        editRemotePath.setText("/spiffs/" + selectedFileName);
                     }
                 } catch (IOException e) {
                     Toast.makeText(this, "Failed to read file", Toast.LENGTH_SHORT).show();
@@ -160,13 +160,13 @@ public class MainActivity extends AppCompatActivity {
         ScanSettings settings = new ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .build();
-        
+
         ScanFilter filter = new ScanFilter.Builder()
                 .setDeviceName("Flaps-OTA")
                 .build();
 
         scanner.startScan(Collections.singletonList(filter), settings, scanCallback);
-        
+
         // Timeout after 10 seconds
         new android.os.Handler().postDelayed(() -> {
             if (scanner != null) {
@@ -198,7 +198,7 @@ public class MainActivity extends AppCompatActivity {
     };
 
     private void performUpload(BluetoothDevice device) {
-        int targetMode = targetGroup.getCheckedRadioButtonId() == R.id.radioFirmware ? 
+        int targetMode = targetGroup.getCheckedRadioButtonId() == R.id.radioFirmware ?
                 BleOtaManager.TARGET_APP_OTA : BleOtaManager.TARGET_SPIFFS_FILE;
         String remotePath = editRemotePath.getText().toString();
 
@@ -234,7 +234,7 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onStatus(String status) {
-                runOnUiThread(() -> textStatus.setText("StatusX: " + status));
+                runOnUiThread(() -> textStatus.setText("Status: " + status));
             }
         });
     }

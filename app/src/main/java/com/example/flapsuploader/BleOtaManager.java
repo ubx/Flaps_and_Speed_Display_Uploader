@@ -44,7 +44,7 @@ public class BleOtaManager {
     private static final int STATE_FINISH = 3;
     private static final int STATE_REBOOT = 4;
 
-    private static final int MAX_RETRIES = 3;
+    private static final int MAX_RETRIES = 30;
     private static final long WRITE_TIMEOUT_MS = 8000;
     private static final long INTER_CHUNK_DELAY_MS = 10;
 
