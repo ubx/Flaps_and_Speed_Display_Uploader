@@ -283,14 +283,11 @@ public class BleOtaManager {
     private void startStartCommand() {
         state = STATE_START;
 
-        /*
         CRC32 crc = new CRC32();
         crc.update(payload);
         Log.i(TAG,
                 String.format("CRC32 = 0x%08X",
                         crc.getValue()));
-        */
-        int crcValue = 0;
         ByteBuffer buf;
 
         if (targetMode == TARGET_SPIFFS_FILE) {
@@ -302,7 +299,7 @@ public class BleOtaManager {
 
             buf.put(CMD_START);
             buf.putInt(payload.length);
-            buf.putInt(crcValue);
+            buf.putInt((int) crc.getValue());
             buf.put(TARGET_SPIFFS_FILE);
             buf.put((byte) path.length);
             buf.put(path);
@@ -314,7 +311,7 @@ public class BleOtaManager {
 
             buf.put(CMD_START);
             buf.putInt(payload.length);
-            buf.putInt(crcValue);
+            buf.putInt((int) crc.getValue());
         }
 
         enqueue(ctrlChar, buf.array(),
