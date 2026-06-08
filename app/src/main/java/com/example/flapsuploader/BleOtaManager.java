@@ -197,6 +197,10 @@ public class BleOtaManager {
                                           int status) {
 
             handler.post(() -> {
+                if (timeoutRunnable == null) {
+                    Log.w(TAG, "Ignoring callback for " + c.getUuid() + " (already handled by timeout or failure)");
+                    return;
+                }
                 cancelTimeout();
                 writeInProgress = false;
 
@@ -379,6 +383,7 @@ public class BleOtaManager {
         cancelTimeout();
 
         timeoutRunnable = () -> {
+            timeoutRunnable = null;
             WriteOp op;
             synchronized (queue) {
                 op = queue.peek();
@@ -411,9 +416,9 @@ public class BleOtaManager {
         }
 
         if (op != null && op.retries++ < MAX_RETRIES) {
-            Log.i(TAG, "Retrying write... attempt " + op.retries + " for " + c.getUuid());
+            Log.i(TAG, "Retrying write... attempt " + op.retries + " for " + (c != null ? c.getUuid() : "unknown"));
             writeInProgress = false;
-            handler.postDelayed(this::processQueue, 500);
+            handler.postDelayed(this::processQueue, 1000);
         } else {
             callback.onError("Write failed after max retries");
         }
@@ -424,6 +429,11 @@ public class BleOtaManager {
     // ------------------------------------------------------------
 
     public void disconnect() {
+        cancelTimeout();
+        synchronized (queue) {
+            queue.clear();
+        }
+        writeInProgress = false;
         if (gatt != null) {
             gatt.disconnect();
             gatt.close();
