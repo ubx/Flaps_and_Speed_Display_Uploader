@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace 'com.example.flapsuploader'
+    namespace 'ch.luethi.flapsuploader'
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.example.flapsuploader"
+        applicationId "ch.luethi.flapsuploader"
         minSdk 24
         targetSdk 34
         versionCode 1

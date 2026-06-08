@@ -1,4 +1,4 @@
-package com.example.flapsuploader;
+package ch.luethi.flapsuploader;
 
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
