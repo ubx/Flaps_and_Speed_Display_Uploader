@@ -285,7 +285,9 @@ public class BleOtaManager {
 
         CRC32 crc = new CRC32();
         crc.update(payload);
-
+        Log.i(TAG,
+                String.format("CRC32 = 0x%08X",
+                        crc.getValue()));
         ByteBuffer buf;
 
         if (targetMode == TARGET_SPIFFS_FILE) {
