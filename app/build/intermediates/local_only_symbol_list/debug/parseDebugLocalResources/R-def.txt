@@ -10,4 +10,6 @@ id targetGroup
 id textSelectedFile
 id textStatus
 layout activity_main
+mipmap ic_launcher
+mipmap ic_launcher_round
 string app_name
